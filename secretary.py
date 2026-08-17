@@ -1,63 +1,92 @@
 import json
-from typing import Optional
-from pydantic import BaseModel, Field
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from google import genai
-from google.genai import types
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from pydantic import BaseModel
+
+
+load_dotenv()
+
 
 class ActionItem(BaseModel):
     owner: str
     task: str
-    due: Optional[str] = None
+    due: str | None = None
+
 
 class Minutes(BaseModel):
-    summary: list[str] = Field(default_factory=list)
-    decisions: list[str] = Field(default_factory=list)
-    action_items: list[ActionItem] = Field(default_factory=list)
+    summary: list[str]
+    decisions: list[str]
+    action_items: list[ActionItem]
 
-def make_minutes(speaker_transcript, slides=None):
-    if not GEMINI_API_KEY:
-        raise RuntimeError("Set GEMINI_API_KEY in .env")
 
-    transcript_text = "\n".join(
-        f'[{s["start"]:.1f}-{s["end"]:.1f}] {s["speaker"]}: {s["text"]}'
-        for s in speaker_transcript
-    )
-    slide_text = "\n".join(
-        f'[{s["time"]:.1f}] SLIDE: {s["text"]}'
-        for s in (slides or [])
-    )
+def load_transcript(path: str = "outputs/speaker_transcript.json") -> str:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
 
-    prompt = f"""You are MeetMind, a meeting-intelligence assistant.
-Create concise meeting minutes from the speaker-labeled transcript.
-Only claim decisions or action items that are actually supported.
-For action items, identify the owner exactly when the transcript supports it;
-otherwise use "Unassigned". Do not invent due dates.
+    lines = []
+    for item in data:
+        speaker = item.get("speaker", "UNKNOWN")
+        text = item.get("text", "").strip()
 
-TRANSCRIPT:
-{transcript_text}
+        if text:
+            lines.append(f"{speaker}: {text}")
 
-SLIDES:
-{slide_text}
+    return "\n".join(lines)
+
+
+def make_minutes(transcript: str) -> Minutes:
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is missing from .env")
+
+    client = genai.Client(api_key=api_key)
+
+    prompt = f"""
+You are MeetMind, an AI meeting secretary.
+
+Analyze the speaker-labeled meeting transcript below.
+
+Return:
+1. A concise bullet-point summary.
+2. The important decisions actually made.
+3. Action items that were actually assigned.
+
+For every action item:
+- owner = the speaker/person responsible, if identifiable
+- task = the concrete task
+- due = deadline if explicitly mentioned, otherwise null
+
+Do NOT invent decisions, owners, tasks, or deadlines.
+If something is unclear, leave it out.
+
+MEETING TRANSCRIPT:
+{transcript}
 """
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
     response = client.models.generate_content(
-        model=GEMINI_MODEL,
+        model="gemini-3.6-flash",
         contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=Minutes,
-        ),
+        config={
+            "response_mime_type": "application/json",
+            "response_schema": Minutes.model_json_schema(),
+        },
     )
+
     return Minutes.model_validate_json(response.text)
 
+
+def save_minutes(minutes: Minutes, path: str = "outputs/minutes.json"):
+    output = minutes.model_dump_json(indent=2)
+    Path(path).write_text(output, encoding="utf-8")
+    print(f"Saved {path}")
+
+
 if __name__ == "__main__":
-    from pathlib import Path
-    transcript = json.loads(Path("outputs/speaker_transcript.json").read_text())
-    slides = []
-    if Path("outputs/slides.json").exists():
-        slides = json.loads(Path("outputs/slides.json").read_text())
-    minutes = make_minutes(transcript, slides)
-    Path("outputs/minutes.json").write_text(minutes.model_dump_json(indent=2))
-    print("Saved outputs/minutes.json")
+    transcript = load_transcript()
+    print(f"Loaded {len(transcript)} characters of speaker transcript.")
+
+    minutes = make_minutes(transcript)
+    save_minutes(minutes)
