@@ -1,0 +1,15 @@
+faster-whisper
+pyannote.audio>=3.1
+jiwer
+opencv-python
+deepface
+paddleocr
+paddlepaddle
+python-dotenv
+scikit-learn
+numpy
+pydantic>=2
+google-genai
+faiss-cpu
+gradio
+mcp
